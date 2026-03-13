@@ -1,0 +1,38 @@
+# AI PDF Summarizer
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Environment variables & secrets (NEVER commit these)
+.env
+.streamlit/secrets.toml
+
+# Cache
+cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Sentence-transformers model cache
+.cache/
+
+# Distribution
+dist/
+build/
+*.egg-info/
