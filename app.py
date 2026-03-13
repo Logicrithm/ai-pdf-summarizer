@@ -1,13 +1,15 @@
 """
-AI PDF Summarizer — Streamlit Application
-------------------------------------------
-Steps 5, 13-16: 4-tab UI with progress, streaming, caching, citations.
-Powered by Groq (LLaMA 3.1) + local sentence-transformers embeddings.
+AI Research Assistant — Streamlit Application
+----------------------------------------------
+Production-ready PDF summarizer and Q&A tool.
+Powered by Groq (LLaMA 3.3) + FAISS + sentence-transformers.
 """
 
 import hashlib
 import os
 import shutil
+import time
+from datetime import date
 import streamlit as st
 from groq import Groq
 from dotenv import load_dotenv
@@ -21,24 +23,38 @@ from qa_engine import answer_question_streaming
 
 load_dotenv()
 
+# ══════════════════════════════════════════════
+# Configuration
+# ══════════════════════════════════════════════
+FREE_DAILY_LIMIT = 3  # Free PDFs per day
+PRODUCT_NAME = "AI Research Assistant"
+
 # ──────────────────────────────────────────────
 # Page Config
 # ──────────────────────────────────────────────
-st.set_page_config(page_title="AI PDF Summarizer", page_icon="📄", layout="wide")
+st.set_page_config(
+    page_title=PRODUCT_NAME,
+    page_icon="🧠",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 # ──────────────────────────────────────────────
-# Custom CSS
+# Custom CSS — Premium Dark Theme
 # ──────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+
 .main-header {
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
     -webkit-background-clip: text; -webkit-text-fill-color: transparent;
     font-size: 2.8rem; font-weight: 700; text-align: center; margin-bottom: 0;
 }
-.sub-header { text-align: center; color: #888; font-size: 1.1rem; margin-bottom: 2rem; }
+.sub-header {
+    text-align: center; color: #888; font-size: 1.15rem; margin-bottom: 0.5rem;
+}
 .stat-card {
     background: rgba(255,255,255,0.05); border-radius: 12px; padding: 1rem;
     text-align: center; border: 1px solid rgba(255,255,255,0.1);
@@ -49,14 +65,46 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     -webkit-background-clip: text; -webkit-text-fill-color: transparent;
 }
 .stat-label { color: #888; font-size: 0.85rem; margin-top: 0.2rem; }
+
+/* Feature cards on landing page */
+.feature-card {
+    background: linear-gradient(145deg, rgba(102,126,234,0.08), rgba(118,75,162,0.05));
+    border: 1px solid rgba(102,126,234,0.2);
+    border-radius: 16px; padding: 1.5rem; text-align: center;
+    transition: transform 0.2s, border-color 0.2s;
+}
+.feature-card:hover {
+    transform: translateY(-2px);
+    border-color: rgba(102,126,234,0.5);
+}
+.feature-icon { font-size: 2.2rem; margin-bottom: 0.5rem; }
+.feature-title { font-weight: 600; font-size: 1.05rem; margin-bottom: 0.3rem; }
+.feature-desc { color: #999; font-size: 0.88rem; line-height: 1.4; }
+
+/* Usage badge */
+.usage-badge {
+    background: linear-gradient(135deg, #667eea20, #764ba220);
+    border: 1px solid #667eea40;
+    border-radius: 8px; padding: 0.5rem 0.8rem;
+    text-align: center; font-size: 0.85rem; margin-bottom: 1rem;
+}
+
+/* Upgrade banner */
+.upgrade-banner {
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    border-radius: 12px; padding: 1rem 1.2rem;
+    text-align: center; color: white; font-size: 0.9rem;
+    margin-top: 0.5rem;
+}
+.upgrade-banner a { color: #fff; font-weight: 600; text-decoration: underline; }
 </style>
 """, unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────
 # Header
 # ──────────────────────────────────────────────
-st.markdown('<p class="main-header">📄 AI PDF Summarizer</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-header">Upload a PDF → Get structured summaries → Ask questions with citations</p>', unsafe_allow_html=True)
+st.markdown(f'<p class="main-header">🧠 {PRODUCT_NAME}</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-header">Upload research papers & PDFs → Get instant summaries → Ask questions with page citations</p>', unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────
 # Session State Init
@@ -70,12 +118,28 @@ if "doc_processed" not in st.session_state:
 if "used_cache" not in st.session_state:
     st.session_state.used_cache = False
 
+# ── Usage tracking (per-day limits) ──
+if "usage_date" not in st.session_state:
+    st.session_state.usage_date = str(date.today())
+if "pdf_count" not in st.session_state:
+    st.session_state.pdf_count = 0
+
+# Reset counter if it's a new day
+if st.session_state.usage_date != str(date.today()):
+    st.session_state.usage_date = str(date.today())
+    st.session_state.pdf_count = 0
+
 # ──────────────────────────────────────────────
 # Groq Client
 # ──────────────────────────────────────────────
 @st.cache_resource
 def get_client():
-    return Groq(api_key=st.secrets["GROQ_API_KEY"])
+    # Works with both secrets.toml (local) and env vars (Render)
+    api_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        st.error("⚠️ GROQ_API_KEY not found. Set it in `.streamlit/secrets.toml` or as an environment variable.")
+        st.stop()
+    return Groq(api_key=api_key)
 
 client = get_client()
 
@@ -89,32 +153,61 @@ with st.sidebar:
     if uploaded_file:
         st.success(f"✅ **{uploaded_file.name}**")
 
-    # Step 16: Clear button
-    if st.button("🗑️ Clear Document"):
-        st.session_state.clear()
-        st.rerun()
+    # Usage counter
+    remaining = max(0, FREE_DAILY_LIMIT - st.session_state.pdf_count)
+    st.markdown(
+        f'<div class="usage-badge">📊 <b>{remaining}/{FREE_DAILY_LIMIT}</b> free PDFs remaining today</div>',
+        unsafe_allow_html=True,
+    )
 
-    if st.button("🗂️ Clear Cache"):
-        cache_dir = os.path.join(os.path.dirname(__file__), "cache")
-        if os.path.exists(cache_dir):
-            shutil.rmtree(cache_dir)
-            os.makedirs(cache_dir, exist_ok=True)
-        st.success("Cache cleared!")
+    # Clear buttons
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("🗑️ Clear Doc", use_container_width=True):
+            st.session_state.clear()
+            st.rerun()
+    with col_b:
+        if st.button("🗂️ Clear Cache", use_container_width=True):
+            cache_dir = os.path.join(os.path.dirname(__file__), "cache")
+            if os.path.exists(cache_dir):
+                shutil.rmtree(cache_dir)
+                os.makedirs(cache_dir, exist_ok=True)
+            st.success("Cache cleared!")
 
     st.markdown("---")
-    st.markdown('<div style="text-align:center;color:#666;font-size:0.8rem;">Powered by Groq · FAISS · PyMuPDF</div>', unsafe_allow_html=True)
 
-# ──────────────────────────────────────────────
+    # Upgrade CTA
+    if remaining <= 1:
+        st.markdown(
+            '<div class="upgrade-banner">'
+            '🚀 Need more? <b>Upgrade to Pro</b> for unlimited PDFs.<br>'
+            '<small>₹199/month · Cancel anytime</small>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown("")
+
+    st.markdown(
+        '<div style="text-align:center;color:#555;font-size:0.75rem;margin-top:0.5rem;">'
+        'Powered by Groq · FAISS · PyMuPDF<br>'
+        '© 2026 AI Research Assistant'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+# ══════════════════════════════════════════════
 # Main Content
-# ──────────────────────────────────────────────
+# ══════════════════════════════════════════════
 if uploaded_file:
     pdf_bytes = uploaded_file.read()
     file_hash = get_file_hash(pdf_bytes)
 
-    # ── Step 5: Multi-PDF hash reset ──
+    # ── Multi-PDF hash reset ──
     if st.session_state.file_hash != file_hash:
+        old_hash = st.session_state.file_hash
         for key in list(st.session_state.keys()):
-            del st.session_state[key]
+            if key not in ("usage_date", "pdf_count"):
+                del st.session_state[key]
         st.session_state.file_hash = file_hash
         st.session_state.doc_processed = False
         st.session_state.used_cache = False
@@ -134,35 +227,48 @@ if uploaded_file:
             st.session_state.doc_processed = True
             st.rerun()
 
-        # ── Step 14: Progress indicators ──
+        # ── Usage limit check ──
+        if st.session_state.pdf_count >= FREE_DAILY_LIMIT:
+            st.warning(
+                f"⚠️ **Free daily limit reached** ({FREE_DAILY_LIMIT} PDFs/day).\n\n"
+                "Upgrade to **Pro** for unlimited PDFs, or come back tomorrow!"
+            )
+            st.stop()
+
+        # Count this PDF
+        st.session_state.pdf_count += 1
+
+        # ── Progress indicators ──
         status = st.empty()
         progress = st.progress(0)
 
-        status.text("📄 Extracting text...")
+        status.text("📄 Extracting text from PDF...")
+        progress.progress(10)
         pages = extract_pages(pdf_bytes)
-        progress.progress(0.2)
 
-        status.text("✂️ Building chunks...")
+        status.text("✂️ Splitting into chunks...")
+        progress.progress(25)
         chunks = chunk_pages(pages, chunk_size=800, overlap=100)
         st.session_state.chunks = chunks
-        progress.progress(0.4)
 
-        status.text("🧠 Generating embeddings...")
+        status.text("🔢 Generating embeddings...")
+        progress.progress(45)
         embeddings = embed_chunks(client, chunks, max_workers=4)
-        progress.progress(0.7)
 
-        status.text("📦 Building search index...")
+        status.text("🗂️ Building search index...")
+        progress.progress(65)
         faiss_index = build_faiss_index(embeddings)
         st.session_state.faiss_index = faiss_index
-        progress.progress(0.9)
 
         status.text("💾 Saving to cache...")
+        progress.progress(85)
         save_cache(pdf_bytes, chunks, embeddings, faiss_index)
-        progress.progress(1.0)
 
-        status.text("✅ Ready!")
-        progress.empty()
+        status.text("✅ Done! Your document is ready.")
+        progress.progress(100)
+        time.sleep(1.5)
         status.empty()
+        progress.empty()
 
         st.session_state.doc_processed = True
         st.rerun()
@@ -187,7 +293,7 @@ if uploaded_file:
 
     st.markdown("---")
 
-    # ── Step 13: 4-tab layout ──
+    # ── 4-tab layout ──
     tab1, tab2, tab3, tab4 = st.tabs([
         "📄 Summary", "💡 Key Concepts", "🔍 Ask Questions", "✅ Verification"
     ])
@@ -197,7 +303,7 @@ if uploaded_file:
         if st.session_state.summary:
             st.markdown(st.session_state.summary)
 
-            # Step 15: Citations
+            # Citations
             if st.session_state.section_sources:
                 st.markdown("---")
                 st.markdown("#### 📌 Section Sources")
@@ -240,7 +346,7 @@ if uploaded_file:
                 st.session_state.summary = full_summary
                 st.session_state.section_sources = section_sources
 
-                # Step 10: Verification pass
+                # Verification pass
                 with st.spinner("🔍 Running verification..."):
                     verification = verify_summary(client, chunks, full_summary)
                     st.session_state.verification = verification
@@ -255,11 +361,9 @@ if uploaded_file:
     # ═══ Tab 2: Key Concepts ═══
     with tab2:
         if st.session_state.summary:
-            # Extract Key Technical Concepts section from summary
             summary = st.session_state.summary
             concepts_start = summary.find("## Key Technical Concepts")
             if concepts_start != -1:
-                # Find next section
                 next_section = summary.find("## ", concepts_start + 1)
                 if next_section == -1:
                     concepts_text = summary[concepts_start:]
@@ -304,7 +408,7 @@ if uploaded_file:
             if full_answer:
                 answer_placeholder.markdown(full_answer)
 
-            # Step 15: Show sources below answer
+            # Show sources below answer
             if source_pages:
                 st.markdown(f"\n> **Source:** Pages {', '.join(str(p) for p in source_pages)}")
 
@@ -320,21 +424,63 @@ if uploaded_file:
             st.info("📝 Generate a summary first to see the verification report.")
 
 else:
-    # ── Landing state ──
-    st.markdown("---")
+    # ══════════════════════════════════════════
+    # Landing Page — No PDF uploaded
+    # ══════════════════════════════════════════
+    st.markdown("")
+
+    # Feature cards
     col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.markdown("### 📄 Summary")
-        st.markdown("Structured summaries with page citations.")
-    with col2:
-        st.markdown("### 💡 Concepts")
-        st.markdown("Key technical concepts grouped by category.")
-    with col3:
-        st.markdown("### 🔍 Q&A")
-        st.markdown("Ask questions with grounded, cited answers.")
-    with col4:
-        st.markdown("### ✅ Verify")
-        st.markdown("Hallucination checking on every summary.")
+    features = [
+        ("📄", "Instant Summaries", "5-section structured summaries with page citations in under 30 seconds."),
+        ("💡", "Key Concepts", "Auto-extracted concepts grouped by category with source pages."),
+        ("🔍", "Smart Q&A", "Ask any question — get grounded, cited answers from your document."),
+        ("✅", "Hallucination Check", "Every summary is verified against source text automatically."),
+    ]
+    for col, (icon, title, desc) in zip([col1, col2, col3, col4], features):
+        with col:
+            st.markdown(
+                f'<div class="feature-card">'
+                f'<div class="feature-icon">{icon}</div>'
+                f'<div class="feature-title">{title}</div>'
+                f'<div class="feature-desc">{desc}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("")
+    st.markdown("")
+
+    # How it works
+    st.markdown("### ⚡ How It Works")
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        st.markdown("**1. Upload** 📤\n\nDrop any research paper or PDF into the sidebar.")
+    with col_b:
+        st.markdown("**2. Analyze** 🧠\n\nAI reads every page, extracts key information, and builds a search index.")
+    with col_c:
+        st.markdown("**3. Explore** 🔍\n\nRead the summary, explore concepts, or ask specific questions with citations.")
 
     st.markdown("---")
-    st.info("👈 Upload a PDF from the sidebar to get started.")
+
+    # Pricing teaser
+    col_free, col_pro = st.columns(2)
+    with col_free:
+        st.markdown(
+            "### 🆓 Free Plan\n"
+            f"- **{FREE_DAILY_LIMIT} PDFs per day**\n"
+            "- Full summaries with citations\n"
+            "- Q&A with page references\n"
+            "- Verification reports\n"
+        )
+    with col_pro:
+        st.markdown(
+            "### 🚀 Pro Plan — ₹199/month\n"
+            "- **Unlimited PDFs**\n"
+            "- Priority processing\n"
+            "- Longer documents supported\n"
+            "- Email support\n"
+        )
+
+    st.markdown("---")
+    st.info("👈 Upload a PDF from the sidebar to get started — it's free!")
