@@ -7,9 +7,10 @@ Powered by Groq (LLaMA 3.3) + FAISS + sentence-transformers.
 
 import hashlib
 import os
+import csv
 import shutil
 import time
-from datetime import date
+from datetime import date, datetime
 import streamlit as st
 from groq import Groq
 from dotenv import load_dotenv
@@ -28,6 +29,16 @@ load_dotenv()
 # ══════════════════════════════════════════════
 FREE_DAILY_LIMIT = 3  # Free PDFs per day
 PRODUCT_NAME = "AI Research Assistant"
+FEEDBACK_FILE = os.path.join(os.path.dirname(__file__), "feedback.csv")
+
+# Pro access codes — set in secrets.toml or env vars
+# Format in secrets.toml: PRO_ACCESS_CODES = "CODE1,CODE2,CODE3"
+PRO_CODES_RAW = ""
+try:
+    PRO_CODES_RAW = st.secrets.get("PRO_ACCESS_CODES", "") or os.environ.get("PRO_ACCESS_CODES", "")
+except Exception:
+    PRO_CODES_RAW = os.environ.get("PRO_ACCESS_CODES", "")
+PRO_ACCESS_CODES = {c.strip() for c in PRO_CODES_RAW.split(",") if c.strip()}
 
 # ──────────────────────────────────────────────
 # Page Config
@@ -129,6 +140,10 @@ if st.session_state.usage_date != str(date.today()):
     st.session_state.usage_date = str(date.today())
     st.session_state.pdf_count = 0
 
+# Pro unlock state
+if "pro_unlocked" not in st.session_state:
+    st.session_state.pro_unlocked = False
+
 # ──────────────────────────────────────────────
 # Groq Client
 # ──────────────────────────────────────────────
@@ -143,6 +158,20 @@ def get_client():
 
 client = get_client()
 
+
+# ──────────────────────────────────────────────
+# Feedback Helper
+# ──────────────────────────────────────────────
+def _save_feedback(rating: str, text: str):
+    """Append feedback to CSV file."""
+    file_exists = os.path.exists(FEEDBACK_FILE)
+    with open(FEEDBACK_FILE, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(["timestamp", "rating", "feedback"])
+        writer.writerow([datetime.now().isoformat(), rating, text])
+
+
 # ──────────────────────────────────────────────
 # Sidebar
 # ──────────────────────────────────────────────
@@ -154,17 +183,26 @@ with st.sidebar:
         st.success(f"✅ **{uploaded_file.name}**")
 
     # Usage counter
-    remaining = max(0, FREE_DAILY_LIMIT - st.session_state.pdf_count)
-    st.markdown(
-        f'<div class="usage-badge">📊 <b>{remaining}/{FREE_DAILY_LIMIT}</b> free PDFs remaining today</div>',
-        unsafe_allow_html=True,
-    )
+    is_pro = st.session_state.pro_unlocked
+    if is_pro:
+        st.markdown(
+            '<div class="usage-badge">🚀 <b>Pro</b> — Unlimited PDFs</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        remaining = max(0, FREE_DAILY_LIMIT - st.session_state.pdf_count)
+        st.markdown(
+            f'<div class="usage-badge">📊 <b>{remaining}/{FREE_DAILY_LIMIT}</b> free PDFs remaining today</div>',
+            unsafe_allow_html=True,
+        )
 
     # Clear buttons
     col_a, col_b = st.columns(2)
     with col_a:
         if st.button("🗑️ Clear Doc", use_container_width=True):
+            pro_state = st.session_state.pro_unlocked
             st.session_state.clear()
+            st.session_state.pro_unlocked = pro_state
             st.rerun()
     with col_b:
         if st.button("🗂️ Clear Cache", use_container_width=True):
@@ -176,16 +214,45 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Upgrade CTA
-    if remaining <= 1:
+    # ── Pro Access Code / Upgrade ──
+    if not is_pro:
+        with st.expander("🔑 Have a Pro access code?"):
+            code_input = st.text_input("Enter your code", type="password", key="pro_code_input")
+            if st.button("Activate", use_container_width=True):
+                if code_input in PRO_ACCESS_CODES:
+                    st.session_state.pro_unlocked = True
+                    st.success("🎉 Pro activated! Unlimited PDFs unlocked.")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error("❌ Invalid code. Please check and try again.")
+
+        # Upgrade CTA
         st.markdown(
             '<div class="upgrade-banner">'
-            '🚀 Need more? <b>Upgrade to Pro</b> for unlimited PDFs.<br>'
-            '<small>₹199/month · Cancel anytime</small>'
+            '🚀 <b>Upgrade to Pro</b> — ₹199/month<br>'
+            '<small>Unlimited PDFs · Priority processing</small><br>'
+            '<a href="https://razorpay.me/@yourname" target="_blank">'
+            '💳 Get Pro Access</a>'
             '</div>',
             unsafe_allow_html=True,
         )
         st.markdown("")
+
+    # ── Feedback ──
+    with st.expander("💬 Send Feedback"):
+        feedback_rating = st.select_slider(
+            "How useful was this tool?",
+            options=["⭐", "⭐⭐", "⭐⭐⭐", "⭐⭐⭐⭐", "⭐⭐⭐⭐⭐"],
+            value="⭐⭐⭐⭐",
+        )
+        feedback_text = st.text_area("Any suggestions?", max_chars=500, height=80)
+        if st.button("Submit Feedback", use_container_width=True):
+            if feedback_text.strip():
+                _save_feedback(feedback_rating, feedback_text.strip())
+                st.success("Thank you for your feedback! 🙏")
+            else:
+                st.warning("Please type your feedback before submitting.")
 
     st.markdown(
         '<div style="text-align:center;color:#555;font-size:0.75rem;margin-top:0.5rem;">'
@@ -205,12 +272,14 @@ if uploaded_file:
     # ── Multi-PDF hash reset ──
     if st.session_state.file_hash != file_hash:
         old_hash = st.session_state.file_hash
+        pro_state = st.session_state.pro_unlocked
         for key in list(st.session_state.keys()):
-            if key not in ("usage_date", "pdf_count"):
+            if key not in ("usage_date", "pdf_count", "pro_unlocked"):
                 del st.session_state[key]
         st.session_state.file_hash = file_hash
         st.session_state.doc_processed = False
         st.session_state.used_cache = False
+        st.session_state.pro_unlocked = pro_state
         for key in ["chunks", "summary", "faiss_index", "verification",
                      "section_sources", "key_concepts"]:
             st.session_state[key] = None
@@ -227,11 +296,11 @@ if uploaded_file:
             st.session_state.doc_processed = True
             st.rerun()
 
-        # ── Usage limit check ──
-        if st.session_state.pdf_count >= FREE_DAILY_LIMIT:
+        # ── Usage limit check (Pro users bypass) ──
+        if not st.session_state.pro_unlocked and st.session_state.pdf_count >= FREE_DAILY_LIMIT:
             st.warning(
                 f"⚠️ **Free daily limit reached** ({FREE_DAILY_LIMIT} PDFs/day).\n\n"
-                "Upgrade to **Pro** for unlimited PDFs, or come back tomorrow!"
+                "Enter a **Pro access code** in the sidebar, or come back tomorrow!"
             )
             st.stop()
 
