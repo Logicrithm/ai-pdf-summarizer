@@ -8,11 +8,17 @@ Completely free — no API key needed.
 
 import numpy as np
 import faiss
+import streamlit as st
 from sentence_transformers import SentenceTransformer
 from concurrent.futures import ThreadPoolExecutor
 
-# Load model once (uses GPU automatically if available)
-_embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+# Load model once and cache across reruns
+@st.cache_resource
+def _load_model():
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+_embed_model = _load_model()
 
 
 def embed_chunks(client, chunks: list[dict], max_workers: int = 4) -> np.ndarray:
